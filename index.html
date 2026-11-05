@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>QQQ · Rischio e direzione</title>
+<style>
+:root{--bg:#fff;--fg:#1f2328;--mut:#6b7280;--card:#f5f6f8;--bd:#d8dce2;--up:#16a34a;--dn:#dc2626;--wa:#d97706}
+@media (prefers-color-scheme:dark){:root{--bg:#131722;--fg:#d1d4dc;--mut:#8b919e;--card:#1c212e;--bd:#2a2e39;--up:#22c55e;--dn:#ef4444;--wa:#f59e0b}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.4 -apple-system,system-ui,sans-serif;padding:14px;padding-top:max(14px,env(safe-area-inset-top))}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:16px;margin-bottom:12px;text-align:center}
+.t{color:var(--mut);font-size:12px}
+.big{font-size:52px;font-weight:800;letter-spacing:1px;margin:2px 0}
+.risk{font-size:22px;font-weight:700}
+.row{display:flex;gap:8px}.row .card{flex:1;margin:0;padding:10px}
+.v{font-size:18px;font-weight:700}
+.track{position:relative;height:34px;margin:10px 4px 4px;border-bottom:2px solid var(--bd)}
+.track span{position:absolute;bottom:-2px;font-size:24px;transition:left .6s;transform:translateX(-50%)}
+.zero{position:absolute;bottom:-8px;height:16px;border-left:2px solid var(--mut)}
+.gapbar{position:absolute;bottom:4px;height:4px;border-radius:2px;transition:all .6s}
+canvas{width:100%;height:160px;display:block}
+#st{font-size:12px;color:var(--mut);text-align:center}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="t">QQQ · <span id="px">–</span></div>
+  <div class="big" id="dir">…</div>
+  <div class="risk" id="risk"></div>
+  <div class="t" id="why" style="margin-top:6px"></div>
+</div>
+<div class="row" style="margin-bottom:12px">
+  <div class="card"><div class="t">Sharpe</div><div class="v" id="v1">–</div></div>
+  <div class="card"><div class="t">Sortino</div><div class="v" id="v2">–</div></div>
+  <div class="card"><div class="t">Omega</div><div class="v" id="v3">–</div></div>
+</div>
+<div class="card" id="cl">
+  <div class="t">LONG 📈 · Achille 🏃 (Sharpe RAPR 10) insegue la tartaruga 🐢 (Sharpe RAPR 30)</div>
+  <div class="risk" id="vl" style="margin-top:4px">–</div>
+  <div class="track"><div class="gapbar" id="gl"></div><span id="tl">🐢</span><span id="al">🏃</span></div>
+  <div class="t" id="wl"></div>
+</div>
+<div class="card" id="cs">
+  <div class="t">SHORT 📉 · Achille 🏃 (Sharpe RAPR 10) insegue la tartaruga 🐢 (Sharpe RAPR 30)</div>
+  <div class="risk" id="vs" style="margin-top:4px">–</div>
+  <div class="track"><div class="gapbar" id="gs"></div><span id="ts">🐢</span><span id="as">🏃</span></div>
+  <div class="t" id="ws"></div>
+</div>
+<div class="card" style="padding:8px"><canvas id="cv"></canvas></div>
+<div id="st"></div>
+<script>
+// ===== Impostazioni =====
+const WORKER="https://yahooproxy.b864v27974.workers.dev";
+const FAST=10, OK=0.3, STRONG=1.0; // Achille = Sharpe RAPR corto (FAST), tartaruga = Sharpe RAPR a periodo LEN; spazio = tartaruga − Achille (valori come nello script, con ×√len)
+const LEN=30, REFRESH_MS=10000;
+const Y="v8/finance/chart/QQQ?interval=1m&range=5d&includePrePost=true";
+const $=id=>document.getElementById(id);
+const avg=a=>a.reduce((x,y)=>x+y,0)/a.length, sum=a=>a.reduce((x,y)=>x+y,0);
+const sd=a=>{if(!a.length)return NaN;const m=avg(a);return Math.sqrt(avg(a.map(x=>(x-m)**2)))};
+
+async function load(){
+  const tries=[`${WORKER}/${Y}`,`${WORKER}/?symbol=QQQ&interval=1m&range=5d&includePrePost=true`,
+    `${WORKER}/?url=${encodeURIComponent("https://query1.finance.yahoo.com/"+Y)}`];
+  let err="";
+  for(const u of tries){
+    try{
+      const r=await fetch(u+(u.includes("?")?"&":"?")+"_="+Date.now(),{cache:"no-store"});if(!r.ok){err=r.status;continue}
+      const j=await r.json(),res=j.chart.result[0],q=res.indicators.quote[0],bars=[];
+      res.timestamp.forEach((t,i)=>{if(q.close[i]!=null)bars.push({t:t*1000,c:q.close[i]})});
+      if(bars.length>LEN+2)return bars;
+    }catch(e){err=e.message}
+  }
+  throw new Error(err||"risposta non valida");
+}
+const rome=new Intl.DateTimeFormat("en-CA",{timeZone:"Europe/Rome",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",hourCycle:"h23"});
+function fromNine(bars){ // barre dell'ultima giornata, dalle 09:00 ora italiana
+  const tag=t=>{const p=Object.fromEntries(rome.formatToParts(new Date(t)).map(x=>[x.type,x.value]));return{d:p.year+p.month+p.day,h:+p.hour}};
+  const day=tag(bars[bars.length-1].t).d;
+  return bars.filter(b=>{const x=tag(b.t);return x.d===day&&x.h>=9});
+}
+function analyze(bars){
+  const c=bars.map(b=>b.c),r=c.map((v,i)=>i?v/c[i-1]-1:NaN),n=c.length;
+  const at=i=>{ // indicatori all'indice i
+    const all=[],neg=[],pos=[];
+    for(let k=0;k<LEN;k++){const x=r[i-k];all.push(x);(x<0?neg:pos).push(x)}
+    const m=avg(all),s=Math.sqrt(LEN);
+    return{srp:m/sd(all)*s,srt:neg.length>1?m/sd(neg)*s:(m>0?Infinity:-Infinity),
+      omg:neg.length?-sum(pos)/sum(neg):Infinity,vol:sd(all),m};
+  };
+  const cur=at(n-1);
+  const vols=[];for(let i=LEN+1;i<n;i+=3)vols.push(at(i).vol);
+  vols.sort((a,b)=>a-b);const med=vols[Math.floor(vols.length/2)];
+  const up=(cur.srp>0)+(cur.srt>0)+(cur.omg>1);
+  const long=up>=2,agree=long?up:3-up; // quanti indicatori concordano
+  let lvl=agree===3&&Math.abs(cur.srp)>=1?0:agree>=2&&Math.abs(cur.srp)>=0.5?1:2;
+  const volHi=cur.vol>1.5*med;if(volHi)lvl=Math.min(2,lvl+1);
+  const why=`${agree}/3 indicatori concordi`+(Math.abs(cur.srp)<0.5?", segnale debole":"")+(volHi?", volatilità alta":"");
+  const dir=long?1:-1;
+  const sp=(i,L)=>{const a=[];for(let k=0;k<L;k++)a.push(r[i-k]);return avg(a)/sd(a)*Math.sqrt(L)}; // Sharpe RAPR come nello script Pine
+  const F=i=>dir*sp(i,FAST),S=i=>dir*sp(i,LEN);
+  return{cur,long,lvl,why,c,fr:sp(n-1,FAST),sr:sp(n-1,LEN),fr5:sp(n-6,FAST),sr5:sp(n-6,LEN),f:F(n-1),sl:S(n-1),gap:S(n-1)-F(n-1),gap5:S(n-6)-F(n-6)};
+}
+function chart(bars){
+  const cv=$("cv"),d=devicePixelRatio||1,W=cv.clientWidth,H=cv.clientHeight;
+  cv.width=W*d;cv.height=H*d;const g=cv.getContext("2d");g.setTransform(d,0,0,d,0,0);
+  const v=bars.map(b=>b.c),mn=Math.min(...v),mx=Math.max(...v),p=(mx-mn)*0.08||1;
+  g.strokeStyle=getComputedStyle(document.documentElement).getPropertyValue("--fg");g.lineWidth=1.5;g.beginPath();
+  v.forEach((x,i)=>{const X=i/(v.length-1)*W,Yy=H-4-(x-(mn-p))/(mx-mn+2*p)*(H-8);i?g.lineTo(X,Yy):g.moveTo(X,Yy)});g.stroke();
+}
+async function run(){
+  try{
+    const all=await load(),day=fromNine(all),few=day.length<LEN+7;
+    const bars=few?all.slice(-(LEN+7)):day,a=analyze(bars),f=x=>isFinite(x)?x.toFixed(2):"∞";
+    const col=a.long?"var(--up)":"var(--dn)",rc=["var(--up)","var(--wa)","var(--dn)"][a.lvl];
+    $("dir").textContent=a.long?"LONG":"SHORT";$("dir").style.color=col;
+    $("risk").textContent="Rischio "+["BASSO","MEDIO","ALTO"][a.lvl];$("risk").style.color=rc;
+    $("why").textContent=a.why;$("px").textContent=bars[bars.length-1].c.toFixed(2);
+    $("v1").textContent=f(a.cur.srp);$("v2").textContent=f(a.cur.srt);$("v3").textContent=f(a.cur.omg);
+    const upd=(d,k)=>{
+      const act=a.long===(d>0),F=d*a.fr,S=d*a.sr,gp=S-F,gp5=d*(a.sr5-a.fr5),sh=gp<gp5-0.1;
+      let m,mc="var(--mut)";
+      if(!act)m="non attiva";
+      else if(F<=0){m="NO: Achille ha attraversato lo zero";mc="var(--dn)"}
+      else if(gp<=0){m="FINITO: Achille ha raggiunto la tartaruga";mc="var(--dn)"}
+      else if(gp<OK){m="ATTENZIONE: Achille sta per raggiungerla";mc="var(--wa)"}
+      else if(sh){m="RESTA, ma Achille si avvicina";mc="var(--wa)"}
+      else{m=gp>=STRONG?"RESTA: grande vantaggio":"RESTA: spazio ok";mc="var(--up)"}
+      $("c"+k).style.opacity=act?1:0.4;
+      $("v"+k).textContent=m;$("v"+k).style.color=mc;
+      const pos=x=>d>0?x:100-x,tp=pos(88),ap=pos(88-Math.max(0,Math.min(3,gp))/3*80); // tartaruga ferma, Achille le va incontro
+      const fl="translateX(-50%)"+(d>0?" scaleX(-1)":"");
+      $("a"+k).style.left=ap+"%";$("t"+k).style.left=tp+"%";$("a"+k).style.transform=fl;$("t"+k).style.transform=fl;
+      const gb=$("g"+k);gb.style.left=Math.min(tp,ap)+"%";gb.style.width=Math.abs(ap-tp)+"%";gb.style.background=mc;
+      $("w"+k).textContent=act?"Spazio "+Math.max(0,gp).toFixed(2)+" (5 barre fa: "+Math.max(0,gp5).toFixed(2)+") · Achille "+a.fr.toFixed(2)+" · tartaruga "+a.sr.toFixed(2):"";
+    };
+    upd(1,"l");upd(-1,"s");
+    chart(day.length>1?day:bars);
+    $("st").textContent="Aggiornato "+new Date().toLocaleTimeString("it-IT")+" · ultima barra "+new Date(bars[bars.length-1].t).toLocaleTimeString("it-IT")+" · barre da 1 min · ogni 10 s · dati da 09:00 (ora italiana)"+(few?" · ancora pochi dati, uso anche le barre precedenti":"");
+  }catch(e){$("dir").textContent="ERRORE";$("dir").style.color="var(--dn)";$("st").textContent="Worker non raggiungibile ("+e.message+"). Se apri il file in locale, il worker deve avere il CORS attivo."}
+}
+run();setInterval(run,REFRESH_MS);addEventListener("resize",run);
+</script>
+</body>
+</html>
